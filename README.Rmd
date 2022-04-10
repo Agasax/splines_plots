@@ -1,0 +1,186 @@
+---
+title: "Spline plot demonstration"
+author: "Lars Mølgaard Saxhaug"
+date: "12/16/2021"
+output: github_document
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(message = FALSE,warning=FALSE)
+```
+
+```{r packages}
+library(tidyverse) 
+library(here) # helpful for file referencing
+library(mgcv) # GAM package
+library(gratia) # ggplot based plotting of GAMs
+library(brms) # bayesian modelling
+library(tidybayes) # integrating brms into a tidyverse workflow
+library(carData) # source for data
+options(contrasts = c("contr.treatment","contr.treatment")) # simple treatment contrasts for ordinal variables
+```
+
+```{r data_prep}
+df <- TitanicSurvival %>% 
+  mutate(sex=as.factor(sex),
+         passengerClass=as.ordered(passengerClass), 
+         survived=as.numeric(as.factor(survived))-1) %>% #code survie as numeric 0 1
+  drop_na(age)
+```
+
+```{r frequentist_model}
+
+simpmod <-  gam(survived~sex+passengerClass+s(age,by=sex,bs="tp",pc=50),family = binomial,data = df)
+
+summary(simpmod)
+draw(simpmod,scales="free") 
+
+```
+```{r}
+simpmod %>% 
+  smooth_estimates(smooth="s(age)",partial_match=TRUE,overall_uncertainty=FALSE) %>% 
+  add_confint() %>% 
+  mutate(across(c(est,ends_with("ci")),exp)) %>% 
+  mutate(sex=str_remove(smooth,"s\\(age\\):sex")) %>% 
+  ggplot(aes(x=age,y=est,ymin=lower_ci,ymax=upper_ci,fill=sex,colour=sex))+
+  geom_line()+
+  geom_ribbon(alpha=0.3)+
+  facet_grid(rows=vars(sex),scales = "free")+
+  scale_y_continuous(name="OR vs age 50")+
+  theme_minimal()+
+  theme(legend.position = "none")
+  
+```
+
+```{r}
+library(visreg)
+visreg_df <- visreg(simpmod,"age","sex",plot = FALSE,trans = exp)
+visreg_df$fit %>% 
+  ggplot(aes(x=age,y=visregFit,ymin=visregLwr,ymax=visregUpr))+
+  geom_line()+
+  geom_ribbon(alpha=0.2)+
+  facet_wrap(~sex)
+```
+
+```{r}
+difference_smooths(simpmod,"s(age)") %>%
+  ggplot(aes(x=age,y=diff))+
+  geom_line(colour="pink")+
+  geom_ribbon(aes(ymin=lower,ymax=upper),alpha=0.2,fill="red")
+df %>% 
+  modelr::data_grid(sex,passengerClass,age=modelr::seq_range(age,100)) %>% 
+  gratia::get_smooths_by_id(
+  )
+
+simpmod %>% 
+  confint("s(age)",partial_match = TRUE) %>% 
+  mutate(across(c(est,lower,upper),exp)) %>% 
+  ggplot(aes(x=age,y=est,ymin=lower,ymax=upper))+
+  geom_line()+
+  geom_ribbon(alpha=0.2)+
+  facet_wrap(~sex)
+
+
+fmod <- gam(survived~sex+passengerClass+s(age,bs="bs")+s(age,by=sex,bs="bs")+s(age,by=passengerClass,bs="bs"),family = binomial,data = df)
+visreg(fmod,"age","sex")$fit %>% 
+ ggplot(aes(x=age,y=visregFit,ymin=visregLwr,ymax=visregUpr))+
+  geom_line()+
+  geom_ribbon(alpha=0.2)+
+  facet_wrap(~sex)
+```
+
+
+
+```{r bayesian model}
+mod1 <- brm(survived~sex+passengerClass+s(age)+s(age,by=sex)+s(age,by=passengerClass),family = bernoulli,data = df,
+            prior = prior(normal(0,1.5),class="b")+
+              prior(cauchy(0,1),class="sds"),
+            control = list(adapt_delta=0.95),
+            file = here("fits","mod1"),
+            file_refit = "on_change") # only refits the model when data or formula has changed, otherwise loads from file
+get_variables(mod1)
+mod1 %>% 
+  gather_draws(`b_.*`,regex = TRUE) %>% # extracts  draws for parameters
+  mutate(or=exp(.value)) %>% # convert to odds ratio scale
+  filter(.variable!="b_Intercept") %>% # drop intercept
+  ggplot(aes(y=.variable
+             ,x=or,
+             fill=after_stat(ifelse(x>1,0,1))))+ # fill colour conditional on or over or under 1
+  stat_halfeye()+
+  theme_tidybayes()+
+  theme(legend.position = "none")
+```
+
+
+
+```{r conditional_splines}
+
+df %>% 
+  modelr::data_grid(sex,passengerClass,age=modelr::seq_range(age,n=101)) %>% 
+  add_epred_draws(mod1) %>% 
+  ggplot(aes(x=age,y=.epred,colour=sex))+
+  stat_lineribbon(.width = c(.99, .95, .8, .5), color = "#08519C")+
+  facet_grid(rows = vars(passengerClass),cols=vars(sex))+
+  scale_fill_brewer()+
+  scale_y_continuous(name="Survival probablitiy")+
+  theme_tidybayes()
+```
+
+
+
+
+
+```{r bayesian_effect_plots}
+comp <- df %>% 
+  modelr::data_grid(sex,age=modelr::seq_range(age,100),passengerClass) %>% 
+  add_epred_draws(mod1,value = "E[y|sex,age,passengerClass]") 
+  
+
+# relative risk for women compared to men by age, passengerclass
+comp %>% 
+  compare_levels(`E[y|sex,age,passengerClass]`,by=sex,fun=`/`) %>% 
+  rename("RR"=`E[y|sex,age,passengerClass]`) %>% 
+  ggplot() +
+  aes(x=age,y=RR) +
+  stat_lineribbon(color = "#08519C") +
+  geom_hline(yintercept = 0,lty=3)+
+  facet_grid(cols = vars(passengerClass)) +
+  scale_fill_brewer(name="Confidence level")+
+  ggthemes::theme_fivethirtyeight()+
+  scale_y_continuous("RR",labels = scales::percent_format())+
+  labs(title = "Relative risk for death of women\ncompared to men according to age\nand passenger class on the Titanic")
+
+# relative risk for women compared to men by age, averaged over passengerclass
+comp %>% 
+group_by(sex,age,.draw) %>% 
+summarise(`E[y|sex,age]`=mean(`E[y|sex,age,passengerClass]`)) %>% 
+compare_levels(`E[y|sex,age]`,by=sex,fun=`/`) %>% 
+  rename("RR"=`E[y|sex,age]`) %>% 
+  ggplot() +
+  aes(x=age,y=RR) +
+  stat_lineribbon(color = "#08519C") +
+  geom_hline(yintercept = 1,lty=3)+
+  scale_fill_brewer(name="Confidence level")+
+  ggthemes::theme_fivethirtyeight()+
+  scale_y_continuous()+
+  labs(title = "Relative risk of death of women compared\nto men according to age on the Titanic",
+       subtitle="Averaged over passenger classes")
+
+
+
+# absolute risk difference for women compared to men by age, averaged over passengerclass
+comp %>% 
+  group_by(sex,age,.draw) %>% 
+  summarise(`E[y|sex,age]`=mean(`E[y|sex,age,passengerClass]`)) %>% 
+  compare_levels(`E[y|sex,age]`,by=sex,fun=`-`) %>% 
+  rename("Difference"=`E[y|sex,age]`) %>% 
+  ggplot() +
+  aes(x=age,y=Difference) +
+  stat_lineribbon(color = "#08519C") +
+  geom_hline(yintercept = 0,lty=3)+
+  scale_fill_brewer(name="Confidence level")+
+  ggthemes::theme_fivethirtyeight()+
+  scale_y_continuous("AR",labels = scales::percent_format())+
+  labs(title = "Absolute risk difference for death of women\ncompared to men according to age on the Titanic",
+       subtitle="Averaged over passenger classes")
+```
