@@ -5,7 +5,7 @@ library(tidyverse) # Easily Install and Load the 'Tidyverse', CRAN v1.3.1
 library(mgcv) # Mixed GAM Computation Vehicle with Automatic Smoothness Estimation, CRAN v1.8-38
 library(gratia) # Graceful 'ggplot'-Based Graphics and Other Functions for GAMs Fitted Using 'mgcv', CRAN v0.7.0
 library(carData) # Companion to Applied Regression Data Sets, CRAN v3.0-5
-gorbaoptions(contrasts = c("contr.treatment", "contr.treatment")) # simple treatment contrasts for ordinal variables
+options(contrasts = c("contr.treatment", "contr.treatment")) # simple treatment contrasts for ordinal variables
 
 
 # data preparation ----
